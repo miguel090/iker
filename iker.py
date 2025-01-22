@@ -1,49 +1,85 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 iker.py script courtesy of Portcullis Security
 
 https://labs.portcullis.co.uk/tools/iker/
 
-Modifications from original v1.0 script:
+Modifications from original v1.1 script:
 	Added shebang for python binary above
-
-Modifications from v1.1 script:
-	Added all known algorithms
-	Added Python2+ and Python3+ support
-	Updated flaws with industry standards
-	Removed flaws stating static risk as risk is dynamic
-	Fixed grammar and updated technical terms (key exchange over Diffie-Hellman)
+	
 '''
 ###############################################################################
-# iker.py
-#
-# This tool can be used to analyze the security of a IPsec based VPN.
-#
-# This script is under GPL v3 License:
-#
-#                                http://www.gnu.org/licenses/gpl-3.0.html
-#
-# From a IP address/range or a list of them, iker.py uses ike-scan to
-# look for common misconfiguration in IKE implementations.
-#
-#
-# Original author: Julio Gomez Ortega (JGO@portcullis-security.com)
-#
+### iker.py
+### 
+### This tool can be used to analyse the security of a IPsec based VPN.
+### 
+### This script is under GPL v3 License:
+### 
+###                                http://www.gnu.org/licenses/gpl-3.0.html
+### 
+### From a IP address/range or a list of them, iker.py uses ike-scan to 
+### look for common misconfiguration in VPN concentrators.
+### 
+### In this version, iker does:
+### 
+### * VPNs discovering
+### * check for IKE v2 support
+### * vendor IDs (VID) extraction
+### * implementation guessing (backoff)
+### * list supported transforms in Main Mode
+### * check aggressive mode and list supported transforms in this mode
+### * enumerate valid client/group IDs in aggressive mode
+### * analyse results to extract actual issues
+### * support 2 output formats
+### 
+### FIXED BUGS / NEW FEATURES:
+### 
+### * Identify if ike-scan launches any error during the scan
+### * Improved the GUI by adding a progressbar and the current transform
+### * Skip feature
+### * Capability to exit at any time saving results
+### * Fixed a bug that did not identify IKE v2 when IKE v1 was not supported
+###
+### Modifications from v1.2 script, by Zamanry https://github.com/Zamanry/iker
+### 	Added all known algorithms
+### 	Added Python2+ and Python3+ support
+### 	Updated flaws with industry standards
+### 	Removed flaws stating static risk as risk is dynamic
+### 	Fixed grammar and updated technical terms (key exchange over Diffie-Hellman)
+### 
+### v1.3 
+### Combined commit from https://github.com/Zamanry/iker/pull/26/commits/cdbfcd62c71dbb79b84aa277acb3274a9099eccb
+### * Scan IKEv2
+###
+### v1.4 FIXED BUGS:
+### 
+### * Fixed bug not allowing the scan to occurr correctly, by changing the approach to always transform the output of commands to strings and not mix bytes (different from Zamanry implementation)
+### * Fixed typo of proccess
+### * Fixed issue with inconsistent IKEv2 information
+### * Fix incomplete IKEv2 implementation, and added arguments to specify its protocols
+### 
+### How to use it? That's easy!
+###
+### # python iker.py -i ips.txt -o iker_output.txt -x iker_output.xml -v
+### 
+### Use -h option to complete help.
+### 
+### Original Author: Julio Gomez Ortega (JGO@portcullis-security.com)
+### v1.2: Miguel Silva
+### 
 ###############################################################################
 
 from sys import exit, stdout
 from os import geteuid
-import io
 import subprocess
 import argparse
-import re
+from re import sub
 from time import localtime, strftime, sleep
-
 
 ###############################################################################
 
 # iker version
-VERSION = "1.2"
+VERSION = "1.4"
 
 # ike-scan full path
 FULLIKESCANPATH = "ike-scan"
@@ -53,9 +89,11 @@ VERBOSE = False
 
 # Encryption algorithms: DES, Triple-DES, AES/128, AES/192 and AES/256
 ENCLIST = []
+ENCLISTv2 = []
 
 # Hash algorithms: MD5 and SHA1
 HASHLIST = []
+HASHLISTv2 = []
 
 # Authentication methods: Pre-Shared Key, RSA Signatures, Hybrid Mode and XAUTH
 AUTHLIST = []
@@ -63,7 +101,6 @@ AUTHLIST = []
 # Diffie-Hellman groups: 1, 2 and 5
 GROUPLIST = []
 
-# Full algorithms lists
 FULLENCLIST = ['1', '2', '3', '4', '5', '6', '7/128', '7/192', '7/256', '8', '65001', '65002', '65004', '65005']
 FULLENCLISTv2 = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '12', '13', '14', '15,' '16', '18', '19', '20', '23']
 FULLHASHLIST = ['1', '2', '3', '4', '5', '6']
@@ -73,7 +110,7 @@ FULLGROUPLIST = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', 
 
 
 # XML Output
-XMLOUTPUT = "iker_output.xml"
+XMLOUTPUT = "output.xml"
 
 # Client IDs dictionary
 CLIENTIDS = ""
@@ -116,14 +153,15 @@ FLAW_AGGR_GRP_NO_ENC = "Aggressive Mode transmits group name without encryption"
 FLAW_CID_ENUM = "Client IDs could be enumerated which should be restricted to only necessary parties or disabled"
 
 
+
 ###############################################################################
-# Methods
+### Methods
 ###############################################################################
 
 ###############################################################################
 def welcome():
 	'''This method prints a welcome message.'''
-
+	
 	print('''
 iker v. %s
 
@@ -131,15 +169,14 @@ The ike-scan based script that checks for security flaws in IPsec-based VPNs.
 
                                by Julio Gomez ( jgo@portcullis-security.com )
 ''' % VERSION)
-
+	
 
 ###############################################################################
 def checkPrivileges():
 	'''This method checks if the script was launched with root privileges.
 	@return True if it was launched with root privs and False in other case.'''
-
+	
 	return geteuid() == 0
-
 
 ###############################################################################
 def getArguments():
@@ -148,7 +185,9 @@ def getArguments():
 	global VERBOSE
 	global FULLIKESCANPATH
 	global ENCLIST
+	global ENCLISTv2
 	global HASHLIST
+	global HASHLISTv2
 	global AUTHLIST
 	global GROUPLIST
 	global XMLOUTPUT
@@ -167,7 +206,10 @@ def getArguments():
 	parser.add_argument("-o", "--output", type=str, help="An output file to store the results.")
 	parser.add_argument("-x", "--xml", type=str, help="An output file to store the results in XML format. Default: output.xml")
 	parser.add_argument("--encalgs", type=str, default="1 5 7", help="The encryption algorithms to check (1-7). Default: DES(1), 3DES(5), AES(7). Example: --encalgs=\"1 2 3 4 5 6 7/128 7/192 7/256 8\"")
+	parser.add_argument("--encalgsv2", type=str, default="1 5 7", help="The encryption algorithms to check in IKEv2 (1-7). Default: DES(1), 3DES(5), AES(7). Example: --encalgs=\"1 2 3 4 5 6 7/128 7/192 7/256 8\"")
 	parser.add_argument("--hashalgs", type=str, default="1 2", help="The hash algorithms to check. Default: MD5(1) and SHA1(2). Example: --hashalgs=\"1 2 3 4 5 6\"")
+	parser.add_argument("--hashalgsv2", type=str, default="1 2", help="The hash algorithms to check in IKEv2. Default: MD5(1) and SHA1(2). Example: --hashalgs=\"1 2 3 4 5 6\"")
+
 	parser.add_argument("--authmethods", type=str, default="1 3 64221 65001", help="The authorization methods to check. Default: PSK(1), RSA Sig(3), Hybrid(64221), XAUTH(65001). Example: --authmethods=\"1 2 3 4 5 6 7 8 64221 65001\"")
 	parser.add_argument("--kegroups", type=str, default="1 2 5 14", help="The key exchange groups to check. Default: MODP-768(1), MODP-1024(2), MODP-1536(5) and MODP-2048(14). Example: --kegroups=\"1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18\"")
 	parser.add_argument("--fullalgs", action="store_true", help="Equivalent to known sets of encalgs, hashalgs, authmethods and keygroups (NOTE: This may take a while!)")
@@ -188,7 +230,7 @@ def getArguments():
 	if args.input:
 		try:
 			f = open(args.input, "r")
-			targets.extend(f.readlines())
+			targets.extend(f.read().splitlines())
 			f.close()
 		except:
 			print("\033[91m[*]\033[0m The input file specified ('%s') could not be opened." % args.input)
@@ -220,10 +262,27 @@ def getArguments():
 					print("\033[91m[*]\033[0m Wrong syntax for the encalgs parameter. Check syntax.")
 					parser.parse_args(["-h"])
 					exit(1)
+	
+	if args.encalgsv2:
+		ENCLISTv2 = args.encalgsv2.split()
+		for alg in ENCLISTv2:
+			parts = alg.split('/')
+			for p in parts:
+				if not p.isdigit():
+					print("\033[91m[*]\033[0m Wrong syntax for the encalgs parameter. Check syntax.")
+					parser.parse_args(["-h"])
+					exit(1)
 
 	if args.hashalgs:
 		HASHLIST = args.hashalgs.split()
 		for alg in HASHLIST:
+			if not alg.isdigit():
+				print("\033[91m[*]\033[0m Wrong syntax for the hashalgs parameter. Check syntax.")
+				parser.parse_args(["-h"])
+				exit(1)
+	if args.hashalgsv2:
+		HASHLISTv2 = args.hashalgsv2.split()
+		for alg in HASHLISTv2:
 			if not alg.isdigit():
 				print("\033[91m[*]\033[0m Wrong syntax for the hashalgs parameter. Check syntax.")
 				parser.parse_args(["-h"])
@@ -266,11 +325,14 @@ def getArguments():
 
 	if args.fullalgs:
 		ENCLIST = FULLENCLIST
+		ENCLISTv2 = FULLENCLISTv2
 		HASHLIST = FULLHASHLIST
+		HASHLISTv2 = FULLHASHLISTv2
 		AUTHLIST = FULLAUTHLIST
 		GROUPLIST = FULLGROUPLIST
 
 	return args, targets
+	
 
 
 ###############################################################################
@@ -279,9 +341,9 @@ def printMessage(message, path=None):
 	if it existed.
 	@param message The message to be printed.
 	@param path The output file, if specified.'''
-
+	
 	print(message)
-
+	
 	if path:
 		try:
 			f = open(path, "a")
@@ -291,28 +353,33 @@ def printMessage(message, path=None):
 			pass
 
 
+
 ###############################################################################
 def launchProcess(command):
 	'''Launch a command in a different process and return the process.'''
-
+	
 	process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
+	
 	error = process.stderr.readlines()
-	error = str(error).strip('[]')
-	if len(error) > 0 and "ERROR" in error[0] and "port 500" in error[0]:
-		printMessage("\033[91m[*]\033[0m Something was wrong! There may be another instance of ike-scan running. Ensure that there is no other proccess using ike-scan before to launch iker.")
+	if len(error) > 0 and b"ERROR" in error[0] and b"port 500" in error[0]:
+		printMessage("\033[91m[*]\033[0m Something was wrong! There may be another instance of ike-scan running. Ensure that there is no other process using ike-scan before to launch iker.")
 		exit(1)
 
-	return process
+	process.wait()
+
+	output = process.stdout.read().decode("utf-8")
+	
+	return output
 
 
 ###############################################################################
 def delay(time):
 	'''This method wait for a delay.
 	@param time The time to wait in milliseconds.'''
-
+	
 	if time:
-		sleep(time / 1000.0)
+		sleep( time / 1000.0 )
+
 
 
 ###############################################################################
@@ -330,8 +397,9 @@ def waitForExit(args, vpns, ip, key, value):
 			printMessage("[*] Skipping test...", args.output)
 	except KeyboardInterrupt:
 		parseResults(args, vpns)
-		printMessage("iker finished at %s" % strftime("%a, %d %b %Y %H:%M:%S +0000", localtime()), args.output)
+		printMessage( "iker finished at %s" % strftime("%a, %d %b %Y %H:%M:%S +0000", localtime()), args.output )
 		exit(0)
+
 
 
 ###############################################################################
@@ -340,15 +408,16 @@ def updateProgressBar(top, current, transform):
 	@param top The total number of transforms combinations
 	@param current The iteration within the bucle (which transform is checking).
 	@param transform The string that represent the transform.'''
-
+	
 	progressbar = "[....................] %d%% - Current transform: %s\r"
 	tt = 20
 	step = top / tt
 	# Progress: [====================] 10% : DES-MD5
 	cc = current / step
-	cc = int(cc)
-	progressbar = progressbar.replace(".", "=", cc)
+	progressbar = progressbar.replace(".", "=", int(cc))
 	perctg = current * 100 / top
+	
+	#print progressbar %(perctg, transform),
 	stdout.write(progressbar % (perctg, transform))
 	stdout.flush()
 
@@ -376,34 +445,21 @@ def discovery(args, targets, vpns):
 	@param args The command line parameters
 	@param targets The targets specified (IPs and/or networks)
 	@param vpns A dictionary to store all the information'''
-
+	
 	printMessage("[*] Discovering IKE services, please wait...", args.output)
-
+	
 	# Launch ike-scan for each target and parse the output
 	for target in targets:
-
-		process = launchProcess("%s -M %s" % (FULLIKESCANPATH, target))
-		process.wait()
-
+		
+		process_output = launchProcess("%s -M %s" % (FULLIKESCANPATH, target))
+		
 		ip = None
 		info = ""
-
-		for line in io.TextIOWrapper(process.stdout, encoding="utf-8"):
+		
+		for line in process_output.splitlines():
 			if not line.split() or 'Starting ike-scan' in line or 'Ending ike-scan' in line:
 				continue
-
 			if line[0].isdigit():
-
-				if info:
-					vpns[ip] = {}
-					vpns[ip]["handshake"] = info.strip()
-					vpns[ip]["v1"] = True
-
-					if VERBOSE:
-						printMessage(info, args.output)
-					else:
-						printMessage("\033[92m[*]\033[0m IKE version 1 is supported by %s" % ip, args.output)
-
 				ip = line.split()[0]
 				info = line
 			else:
@@ -419,60 +475,58 @@ def discovery(args, targets, vpns):
 				printMessage("\033[92m[*]\033[0m IKE version 1 is supported by %s" % ip, args.output)
 
 
+
 ###############################################################################
 def checkIKEv2(args, targets, vpns):
 	'''This method checks if IKE version 2 is supported.
 	@param args The command line parameters
 	@param vpns A dictionary to store all the information'''
-
+	
 	printMessage("[*] Checking for IKE version 2 support...", args.output)
 	ips = []
-
+	
 	try:
 		# Check the IKE v2 support
 		for target in targets:
-
-			process = launchProcess("%s -2 -M %s" % (FULLIKESCANPATH, target))
-			process.wait()
-
+			
+			process_output = launchProcess("%s --ikev2 -M %s" % (FULLIKESCANPATH, target))
+			
 			ip = None
 			info = ""
-
-			for line in io.TextIOWrapper(process.stdout, encoding="utf-8"):
+			no_ikev1=False
+			for line in process_output.splitlines():
 				if not line.split() or "Starting ike-scan" in line or "Ending ike-scan" in line:
 					continue
 
 				if line[0].isdigit():
-
-					if info:
-						printMessage("\033[92m[*]\033[0m IKE version 2 is supported by %s" % ip, args.output)
-						ips.append(ip)
-						if ip in list(vpns.keys()):
-							vpns[ip]["v2"] = True
-						else:
-							printMessage("[*] IKE version 1 support was not identified in this host (%s). iker will not perform more tests against this host." % ip, args.output)
-					else:
-						printMessage("\033[91m[*]\033[0m IKE version 2 is not supported by %s" % target, args.output)
 					ip = line.split()[0]
-					info = line
-
-			if info and ip not in ips:
-				printMessage("\033[92m[*]\033[0m IKE version 2 is supported by %s" % ip, args.output)
-				if ip in list(vpns.keys()):
-					vpns[ip]["v2"] = True
+					printMessage("\033[92m[*]\033[0m IKE version 2 is supported by %s" % ip, args.output)
+					ips.append(ip)
+					if ip in list(vpns.keys()):
+						vpns[ip]["v2"] = True
+						break
+					else:
+						vpns[ip] = {}
+						vpns[ip]["v2"] = True
+						vpns[ip]["v1"] = False
+						vpns[ip]["v1"] = False
+						no_ikev1=True
 				else:
-					printMessage("[*] IKE version 1 support was not identified in this host (%s). iker will not perform more tests against this host." % ip, args.output)
-			else:
-				printMessage("\033[91m[*]\033[0m IKE version 2 is not supported by %s" % target, args.output)
+					printMessage("\033[91m[*]\033[0m IKE version 2 is not supported by %s" % target, args.output)
+				info = info + line
 
+			if no_ikev1:
+				vpns[ip]["handshake"] = info
+				printMessage("[*] IKE version 1 support was not identified in host %s" % ip, args.output)
+				no_ikev1=False
+		
 		# Complete those that don't support it
 		for ip in list(vpns.keys()):
-
 			if "v2" not in list(vpns[ip].keys()):
 				vpns[ip]["v2"] = False
 	except KeyboardInterrupt:
 		waitForExit(args, vpns, ip, "v2", False)
-
+	
 
 ###############################################################################
 def fingerprintVID(args, vpns, handshake=None):
@@ -481,12 +535,12 @@ def fingerprintVID(args, vpns, handshake=None):
 	@param args The command line parameters
 	@param vpns A dictionary to store all the information
 	@param handshake The handshake where look for a VID'''
-
+	
 	for ip in list(vpns.keys()):
-
+		
 		if "vid" not in list(vpns[ip].keys()):
 			vpns[ip]["vid"] = []
-
+		
 		# Fingerprint based on VIDs
 		hshk = vpns[ip]["handshake"]
 		if handshake:
@@ -494,26 +548,25 @@ def fingerprintVID(args, vpns, handshake=None):
 				hshk = handshake
 			else:
 				continue
-
+		
 		transform = ""
 		vid = ""
 		for line in hshk.splitlines():
-
 			if "SA=" in line:
 				transform = line.strip()[4:-1]
-
-			if "VID=" in line and "(" in line and ")" in line and "draft-ietf" not in line and "IKE Fragmentation" not in line and "Dead Peer Detection" not in line and "XAUTH" not in line and "RFC 3947" not in line and "heartbeat_notify" not in line.lower():
-
-				vid = line[line.index('(')+1:line.index(')')]
-
+			
+			if "VID=" in line and "(" in line and ")" in line and "draft-ietf" not in line and "IKE Fragmentation" not in line and "Dead Peer Detection" not in line and "XAUTH" not in line and "RFC 3947" not in line and "Heartbeat Notify" not in line:
+				
+				vid = line[line.index("(")+1:line.index(")")]
+		
 		enc = False
 		for pair in vpns[ip]["vid"]:
 			if pair[0] == vid:
 				enc = True
-
+		
 		if vid and not enc:
 			vpns[ip]["vid"].append((vid, hshk))
-
+			
 			printMessage("\033[92m[*]\033[0m Vendor ID identified for IP %s with transform %s: %s" % (ip, transform, vid), args.output)
 
 
@@ -523,39 +576,37 @@ def fingerprintShowbackoff(args, vpns, transform="", vpnip=""):
 	are written in the vpns variable.
 	@param args The command line parameters
 	@param vpns A dictionary to store all the information'''
-
-	printMessage("\n[*] Trying to fingerprint the devices%s. This proccess is going to take a while (1-5 minutes per IP). Be patient..." % (transform and " (again)" or transform), args.output)
-
+	
+	printMessage( "\n[*] Trying to fingerprint the devices%s. This process is going to take a while (1-5 minutes per IP). Be patient..." % (transform and " (again)" or transform) , args.output)
+	
 	try:
 		for ip in list(vpns.keys()):
-
+			
 			if vpnip and vpnip != ip:
 				continue
+			
+			process_output = launchProcess("%s --showbackoff %s %s" % (FULLIKESCANPATH, ((transform and ("--trans="+transform) or transform)), ip))			
 
-			transform = transform.replace(" ", "")
-			process = launchProcess("%s --showbackoff %s %s" % (FULLIKESCANPATH, ((transform and ("--trans="+transform) or transform)), ip))
 			vpns[ip]["showbackoff"] = ""
-			process.wait()
-
-			# Fingerprint based on the VPN service behavior
-			for line in io.TextIOWrapper(process.stdout, encoding="utf-8"):
-				line = str(line)
+			
+			# Fingerprint based on the VPN service behaviour
+			for line in process_output.splitlines():
 				if "Implementation guess:" in line:
-
+					
 					vendor = line[line.index('Implementation guess:')+22:].strip()
-
+					
 					if vendor.lower() != "unknown":
-
+						
 						vpns[ip]["showbackoff"] = vendor
-
+					
 						printMessage("\033[92m[*]\033[0m Implementation guessed for IP %s: %s" % (ip, vendor), args.output)
-
+			
 			if not vpns[ip]["showbackoff"]:
 				if transform:
-					printMessage("\033[91m[*]\033[0m The device %s could not be fingerprinted. It won't be retry again." % ip, args.output)
+					printMessage("\033[91m[*]\033[0m The device %s could not been fingerprinted. It won't be retry again." % ip, args.output)
 					vpns[ip]["showbackoff"] = " "
 				else:
-					printMessage("\033[91m[*]\033[0m The device %s could not be fingerprinted because no transform is known." % ip, args.output)
+					printMessage("\033[91m[*]\033[0m The device %s could not been fingerprinted because no transform is known." % ip, args.output)
 	except KeyboardInterrupt:
 		waitForExit(args, vpns, ip, "showbackoff", " ")
 
@@ -566,46 +617,42 @@ def checkEncryptionAlgs(args, vpns):
 	are written in the vpns variable.
 	@param args The command line parameters
 	@param vpns A dictionary to store all the information'''
-
+	
 	try:
 		top = len(ENCLIST) * len(HASHLIST) * len(AUTHLIST) * len(GROUPLIST)
-		# current = 0
+
 		for ip in list(vpns.keys()):
-
-			current = 0
-			printMessage("\n[*] Looking for accepted transforms at %s" % ip, args.output)
+			current=0
+			printMessage( "\n[*] Looking for accepted IKEv1 transforms at %s" % ip, args.output)
 			vpns[ip]["transforms"] = []
-
+			
 			for enc in ENCLIST:
 				for hsh in HASHLIST:
 					for auth in AUTHLIST:
 						for group in GROUPLIST:
-
-							process = launchProcess("%s -M --trans=%s,%s,%s,%s %s" % (FULLIKESCANPATH, enc, hsh, auth, group, ip))
-							process.wait()
-
-							output = io.TextIOWrapper(process.stdout, encoding="utf-8")
+							
+							process_output = launchProcess("%s -M --trans=%s,%s,%s,%s %s" % (FULLIKESCANPATH, enc, hsh, auth, group, ip))
+							#print("%s -M --trans=%s,%s,%s,%s %s" % (FULLIKESCANPATH, enc, hsh, auth, group, ip))					
 							info = ""
 							new = False
-							for line in output:
+							for line in process_output.splitlines():
 								if "Starting ike-scan" in line or "Ending ike-scan" in line or line.strip() == "":
 									continue
-
-								line = line.strip()
+								
 								info += line + "\n"
-
 								if "SA=" in line:
 									new = True
-									transform = line[4:-1]
+									transform = line.strip()[4:-1]
 									printMessage("\033[92m[*]\033[0m Transform found: %s" % transform, args.output)
-
+									printMessage("%s -M --trans=%s,%s,%s,%s %s" % (FULLIKESCANPATH, enc, hsh, auth, group, ip), args.output)
+							
 							if new:
-								vpns[ip]["transforms"].append(("%s, %s, %s, %s" % (enc, hsh, auth, group), transform, info))
+								vpns[ip]["transforms"].append(("%s,%s,%s,%s" % (enc,hsh,auth,group), transform, info) )
 								fingerprintVID(args, vpns, info)
-								# If the backoff could not be fingerprinted before...
+								# If the backoff could not been fingerprinted before...
 								if not args.nofingerprint and not vpns[ip]["showbackoff"]:
 									fingerprintShowbackoff(args, vpns, vpns[ip]["transforms"][0][0], ip)
-
+							
 							current += 1
 							updateProgressBar(top, current, str(enc)+","+str(hsh)+","+str(auth)+","+str(group))
 							delay(DELAY)
@@ -615,6 +662,61 @@ def checkEncryptionAlgs(args, vpns):
 		else:
 			waitForExit(args, vpns, ip, "transforms", vpns[ip]["transforms"])
 
+###############################################################################
+
+def checkEncryptionAlgsv2(args, vpns):
+	'''This method tries to discover accepted transforms. The results
+	are written in the vpns variable.
+	@param args The command line parameters
+	@param vpns A dictionary to store all the information'''
+
+	try:
+		top = len(ENCLISTv2) * len(HASHLISTv2) * len(AUTHLIST) * len(GROUPLIST)
+		# current = 0
+		for ip in list(vpns.keys()):
+			current = 0
+			printMessage("\n[*] Looking for accepted IKEv2 transforms at %s" % ip, args.output)
+			vpns[ip]["transformsv2"] = []
+
+			for enc in ENCLISTv2:
+				for hsh in HASHLISTv2:
+					for auth in AUTHLIST:
+						for group in GROUPLIST:
+
+							process_output = launchProcess("%s -M --ikev2 --trans=%s,%s,%s,%s %s" % (FULLIKESCANPATH, enc, hsh, auth, group, ip))
+
+							info = ""
+							new = False
+							for line in process_output.splitlines():
+								if "Starting ike-scan" in line or "Ending ike-scan" in line or line.strip() == "":
+									continue
+
+								line = line.strip()
+								info += line + "\n"
+
+								if "SA=" in line:
+									new = True
+									transform = line[4:-1]
+									if "/" in enc: bits = enc.split("/")[1]
+									else: bits = "-"
+									printMessage("\033[92m[*]\033[0m Transform found: %s (Enc-bits: %s) %s" % (transform, bits, ip), args.output)
+									printMessage("%s -M --ikev2 --trans=%s,%s,%s,%s %s" % (FULLIKESCANPATH, enc, hsh, auth, group, ip), args.output)
+
+							if new:
+								vpns[ip]["transformsv2"].append(("%s, %s, %s, %s" % (enc, hsh, auth, group), transform, info))
+								fingerprintVID(args, vpns, info)
+								# If the backoff could not be fingerprinted before...
+								if not args.nofingerprint and not vpns[ip]["showbackoff"]:
+									fingerprintShowbackoff(args, vpns, vpns[ip]["transformsv2"][0][0], ip)
+
+							current += 1
+							updateProgressBar(top, current, str(enc)+","+str(hsh)+","+str(auth)+","+str(group))
+							delay(DELAY)
+	except KeyboardInterrupt:
+		if "transformsv2" not in list(vpns[ip].keys()) or not vpns[ip]["transformsv2"]:
+			waitForExit(args, vpns, ip, "transformsv2", [])
+		else:
+			waitForExit(args, vpns, ip, "transformsv2", vpns[ip]["transformsv2"])
 
 ###############################################################################
 def checkAggressive(args, vpns):
@@ -622,45 +724,42 @@ def checkAggressive(args, vpns):
 	it also store the returned handshake to a text file.
 	@param args The command line parameters
 	@param vpns A dictionary to store all the information'''
-
+	
 	try:
 		top = len(ENCLIST) * len(HASHLIST) * len(AUTHLIST) * len(GROUPLIST)
-		current = 0
 		for ip in list(vpns.keys()):
-
-			printMessage("\n[*] Looking for accepted transforms in aggressive mode at %s" % ip, args.output)
+			current = 0
+			printMessage("\n[*] Looking for accepted IKEv1 transforms in aggressive mode at %s" % ip, args.output)
 			vpns[ip]["aggressive"] = []
-
+			
 			for enc in ENCLIST:
 				for hsh in HASHLIST:
 					for auth in AUTHLIST:
 						for group in GROUPLIST:
-
-							process = launchProcess("%s -M --aggressive -P%s_handshake.txt --trans=%s,%s,%s,%s %s" % (FULLIKESCANPATH, ip, enc, hsh, auth, group, ip))
-							process.wait()
-
-							output = io.TextIOWrapper(process.stdout, encoding="utf-8")
+							
+							process_output = launchProcess("%s -M --aggressive -P%s_handshake.txt --trans=%s,%s,%s,%s %s" % (FULLIKESCANPATH, ip, enc, hsh, auth, group, ip))
 
 							info = ""
 							new = False
-							for line in output:
+							for line in process_output.splitlines():
+								
 								if "Starting ike-scan" in line or "Ending ike-scan" in line or line.strip() == "":
 									continue
-
+								
 								info += line + "\n"
-
+								
 								if "SA=" in line:
 									new = True
 									transform = line.strip()[4:-1]
 									printMessage("\033[92m[*]\033[0m Aggressive mode supported with transform: %s" % transform, args.output)
-
+							
 							if new:
-								vpns[ip]["aggressive"].append(("%s, %s, %s, %s" % (enc, hsh, auth, group), transform, info))
+								vpns[ip]["aggressive"].append(("%s,%s,%s,%s" % (enc,hsh,auth,group), transform, info) )
 								fingerprintVID(args, vpns, info)
-								# If the backoff could not be fingerprinted before...
-								if not args.nofingerprint and not vpns[ip]["showbackoff"]:
+								# If the backoff could not been fingerprinted before...
+								if not vpns[ip]["showbackoff"]:
 									fingerprintShowbackoff(args, vpns, vpns[ip]["aggressive"][0][0], ip)
-
+							
 							current += 1
 							updateProgressBar(top, current, str(enc)+","+str(hsh)+","+str(auth)+","+str(group))
 							delay(DELAY)
@@ -668,7 +767,8 @@ def checkAggressive(args, vpns):
 		if "aggressive" not in list(vpns[ip].keys()) or not vpns[ip]["aggressive"]:
 			waitForExit(args, vpns, ip, "aggressive", [])
 		else:
-			waitForexit(args, vpns, ip, "aggressive", vpns[ip]["aggressive"])
+			waitForExit(args, vpns, ip, "aggressive", vpns[ip]["aggressive"])
+
 
 
 ###############################################################################
@@ -677,72 +777,67 @@ def enumerateGroupIDCiscoDPD(args, vpns, ip):
 	@param args The command line parameters
 	@param vpns A dictionary to store all the information
 	@param ip The ip where perform the enumeration'''
-
+	
 	# Check if possible
-
-	process = launchProcess("%s --aggressive --trans=%s --id=badgroupiker573629 %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], ip))
-	process.wait()
-
+	
+	process_output = launchProcess("%s --aggressive --trans=%s --id=badgroupiker573629 %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], ip))
+	
 	possible = True
-	for line in io.TextIOWrapper(process.stdout, encoding="utf-8"):
-		line = str(line)
+	for line in process_output.splitlines():
 		if "dead peer" in line.lower():
 			possible = False
 			break
-
+	
 	if possible:
 		delay(DELAY)
-
+		
 		# Enumerate users
 		try:
 			fdict = open(args.clientids, "r")
 			cnt = 0
-
+			
 			for cid in fdict:
 				cid = cid.strip()
+				
+				process_output = launchProcess("%s --aggressive --trans=%s --id=%s %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], cid, ip))
+				first_line_output=process_output.splitlines()[1].strip()
 
-				process = launchProcess("%s --aggressive --trans=%s --id=%s %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], cid, ip))
-				process.wait()
-
-				output = io.TextIOWrapper(process.stdout, encoding="utf-8")[1].strip()
-
-				# Check if the service is still responding
-				msg = sub(r'(HDR=\()[^\)]*(\))', r'\1xxxxxxxxxxx\2', output)
+				
+				# Check if the service is still responding 
+				msg = sub(r'(HDR=\()[^\)]*(\))', r'\1xxxxxxxxxxx\2', first_line_output)
 				if not msg:
 					cnt += 1
 					if cnt > 3:
-						printMessage("\033[91m[*]\033[0m The IKE service cannot be reached; a firewall might filter your IP address. DPD Group ID enumeration could not be performed...", args.output)
+						printMessage( "\033[91m[*]\033[0m The IKE service cannot be reached; a firewall might filter your IP address. DPD Group ID enumeration could not be performed...", args.output)
 						return False
-
+				
 				enc = False
 				for line in output:
-					line = str(line)
 					if "dead peer" in line.lower():
 						enc = True
 						break
-
+				
 				delay(DELAY)
-
+				
 				# Re-check the same CID if it looked valid
 				if enc:
-					process = launchProcess("%s --aggressive --trans=%s --id=%s %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], cid, ip))
-					process.wait()
-
+					process_output = launchProcess("%s --aggressive --trans=%s --id=%s %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], cid, ip))
+					
 					enc = False
-					for line in io.TextIOWrapper(process.stdout, encoding="utf-8"):
-						line = str(line)
+					for line in process_output.splitlines():
 						if "dead peer" in line.lower():
 							vpns[ip]["clientids"].append(cid)
-							printMessage("\033[92m[*]\033[0m A potential valid client ID was found: %s" % cid, args.output)
+							printMessage( "\033[92m[*]\033[0m A potential valid client ID was found: %s" % cid, args.output)
 							break
-
+					
 					delay(DELAY)
-
+			
 			fdict.close()
 		except:
 			possible = False
-
+	
 	return possible
+
 
 
 ###############################################################################
@@ -750,53 +845,54 @@ def enumerateGroupID(args, vpns):
 	'''This method tries to enumerate valid client IDs from a dictionary.
 	@param args The command line parameters
 	@param vpns A dictionary to store all the information'''
-
+	
 	if not args.clientids:
 		return
-
+	
+	
 	for ip in list(vpns.keys()):
-
+		
 		vpns[ip]["clientids"] = []
-
+		
 		if not len(vpns[ip]["aggressive"]):
 			continue
-
-		printMessage("\n[*] Trying to enumerate valid client IDs for IP %s" % ip, args.output)
-
+		
+		printMessage( "\n[*] Trying to enumerate valid client IDs for IP %s" % ip, args.output)
+		
 		# Check if the device is vulnerable to Cisco DPD group ID enumeration and exploit it
 		done = False
 		if "showbackoff" in list(vpns[ip].keys()) and "cisco" in vpns[ip]["showbackoff"].lower():
 			done = enumerateGroupIDCiscoDPD(args, vpns, ip)
-
+		
 		if "vid" in list(vpns[ip].keys()) and len(vpns[ip]["vid"]) > 0:
 			for vid in vpns[ip]["vid"]:
 				if "cisco" in vid[0].lower():
 					done = enumerateGroupIDCiscoDPD(args, vpns, ip)
 					break
-
+		
 		if done:
-			# if not len(vpns[ip]["clientids"]):
-			continue  # If Cisco DPD enumeration, continue
-
-		#  Try to guess the "unvalid client ID" message
-		process = launchProcess("%s --aggressive --trans=%s --id=badgroupiker123456 %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], ip))
-		process.wait()
-		message1 = sub(r'(HDR=\()[^\)]*(\))', r'\1xxxxxxxxxxx\2', io.TextIOWrapper(process.stdout, encoding="utf-8")[1].strip())
-
+			#if not len (vpns[ip]["clientids"]):
+			continue # If Cisco DPD enumeration, continue
+		
+		# Try to guess the "unvalid client ID" message
+		process_output = launchProcess("%s --aggressive --trans=%s --id=badgroupiker123456 %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], ip))
+		first_line_output=process_output.splitlines()[1].strip()
+		message1 = sub(r'(HDR=\()[^\)]*(\))', r'\1xxxxxxxxxxx\2', first_line_output )
+		
 		delay(DELAY)
-
-		process = launchProcess("%s --aggressive --trans=%s --id=badgroupiker654321 %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], ip))
-		process.wait()
-		message2 = sub(r'(HDR=\()[^\)]*(\))', r'\1xxxxxxxxxxx\2', io.TextIOWrapper(process.stdout, encoding="utf-8")[1].strip())
-
+		
+		process_output = launchProcess("%s --aggressive --trans=%s --id=badgroupiker654321 %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], ip))
+		first_line_output=process_output.splitlines()[1].strip()
+		message2 = sub(r'(HDR=\()[^\)]*(\))', r'\1xxxxxxxxxxx\2', first_line_output )
+		
 		delay(DELAY)
-
-		process = launchProcess("%s --aggressive --trans=%s --id=badgroupiker935831 %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], ip))
-		process.wait()
-		message3 = sub(r'(HDR=\()[^\)]*(\))', r'\1xxxxxxxxxxx\2', io.TextIOWrapper(process.stdout, encoding="utf-8")[1].strip())
-
+		
+		process_output = launchProcess("%s --aggressive --trans=%s --id=badgroupiker935831 %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], ip))
+		first_line_output=process_output.splitlines()[1].strip()
+		message3 = sub(r'(HDR=\()[^\)]*(\))', r'\1xxxxxxxxxxx\2', first_line_output )
+		
 		delay(DELAY)
-
+		
 		invalidmsg = ""
 		if message1 == message2:
 			invalidmsg = message1
@@ -809,39 +905,61 @@ def enumerateGroupID(args, vpns):
 			invalidmsg = message2
 			vpns[ip]["clientids"].append("badgroupiker123456")
 		else:
-			printMessage("\033[91m[*]\033[0m It was not possible to get a common response to invalid client IDs. This test will be skipped.", args.output)
+			printMessage( "\033[91m[*]\033[0m It was not possible to get a common response to invalid client IDs. This test will be skipped.", args.output)
 			return
-
+		
 		# Enumerate users
 		try:
 			fdict = open(args.clientids, "r")
 			cnt = 0
-
+			
 			for cid in fdict:
 				cid = cid.strip()
-
-				process = launchProcess("%s --aggressive --trans=%s --id=%s %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], cid, ip))
-				process.wait()
-				msg = sub(r'(HDR=\()[^\)]*(\))', r'\1xxxxxxxxxxx\2', io.TextIOWrapper(process.stdout, encoding="utf-8")[1].strip())
-
+				
+				process_output = launchProcess("%s --aggressive --trans=%s --id=%s %s" % (FULLIKESCANPATH, vpns[ip]["aggressive"][0][0], cid, ip))
+				first_line_output=process_output.splitlines()[1].strip()
+				msg = sub(r'(HDR=\()[^\)]*(\))', r'\1xxxxxxxxxxx\2', first_line_output )
+				
 				if not msg:
 					cnt += 1
 					if cnt > 3:
-						printMessage("\033[91m[*]\033[0m The IKE service cannot be reached; a firewall might filter your IP address. Skippig to the following service...", args.output)
+						printMessage( "\033[91m[*]\033[0m The IKE service cannot be reached; a firewall might filter your IP address. Skippig to the following service...", args.output)
 						break
-
+					
 				elif msg != invalidmsg:
 					vpns[ip]["clientids"].append(cid)
-					printMessage("\033[92m[*]\033[0m A potential valid client ID was found: %s" % cid, args.output)
-
+					printMessage( "\033[92m[*]\033[0m A potential valid client ID was found: %s" % cid, args.output)
+				
 				delay(DELAY)
-
+			
 			fdict.close()
 		except:
 			pass
 
-
 ###############################################################################
+def findTransformFlaw(args, fxml, transforms, flaw_string, flaw, announcement, announcement_text, flawid):
+	first = True
+	for trio in transforms:
+		if flaw_string in trio[1]:
+			if first:
+				if not announcement:
+					printMessage("\n[*] %s" % announcement_text)
+					announcement = True
+				first = False
+				printMessage("\033[91m[*]\033[0m %s" % flaw, args.output)
+
+			if VERBOSE:
+				printMessage("%s" % trio[2], args.output)
+
+			try:
+				fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, flaw, trio[1], trio[2]))
+				flawid += 1
+			except:
+				pass
+	return flawid
+
+		
+
 def parseResults(args, vpns, startTime, endTime):
 	'''This method analyzes the results and prints them where correspond.
 	@param args The command line parameters
@@ -933,505 +1051,59 @@ def parseResults(args, vpns, startTime, endTime):
 				pass
 
 		# Weak encryption/hash/DH group algorithms and auth. methods
-		first = True
+
 		if "transforms" in list(vpns[ip].keys()):
-			for trio in vpns[ip]["transforms"]:
-
-				if "Enc=DES" in trio[1]:
-					if first:
-						if not ENC_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % ENC_ANNOUNCEMENT_TEXT)
-							ENC_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_ENC_DES, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_ENC_DES, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Enc=IDEA" in trio[1]:
-					if first:
-						if not ENC_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % ENC_ANNOUNCEMENT_TEXT)
-							ENC_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_ENC_IDEA, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_ENC_IDEA, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Enc=Blowfish" in trio[1]:
-					if first:
-						if not ENC_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % ENC_ANNOUNCEMENT_TEXT)
-							ENC_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_ENC_BLOW, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_ENC_BLOW, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Enc=RC5" in trio[1]:
-					if first:
-						if not ENC_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % ENC_ANNOUNCEMENT_TEXT)
-							ENC_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_ENC_RC5, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_ENC_RC5, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Enc=CAST" in trio[1]:
-					if first:
-						if not ENC_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % ENC_ANNOUNCEMENT_TEXT)
-							ENC_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_ENC_CAST, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_ENC_CAST, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Enc=3DES" in trio[1]:
-					if first:
-						if not ENC_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % ENC_ANNOUNCEMENT_TEXT)
-							ENC_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_ENC_3DES, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_ENC_3DES, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Hash=MD5" in trio[1]:
-					if first:
-						if not HASH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % HASH_ANNOUNCEMENT_TEXT)
-							HASH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_HASH_MD5, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_HASH_MD5, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Hash=SHA1" in trio[1]:
-					if first:
-						if not HASH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % HASH_ANNOUNCEMENT_TEXT)
-							HASH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_HASH_SHA1, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_HASH_SHA1, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Group=1:modp768" in trio[1]:
-					if first:
-						if not KE_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % KE_ANNOUNCEMENT_TEXT)
-							KE_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_DHG_1, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_DHG_1, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Group=2:modp1024" in trio[1]:
-					if first:
-						if not KE_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % KE_ANNOUNCEMENT_TEXT)
-							KE_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_DHG_2, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_DHG_2, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Group=5:modp1536" in trio[1]:
-					if first:
-						if not KE_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % KE_ANNOUNCEMENT_TEXT)
-							KE_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_DHG_5, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_DHG_5, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=PSK" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_PSK, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_PSK, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=DSS" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_DSA_SIG, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_DSA_SIG, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=RSA_Sig" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_RSA_SIG, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_RSA_SIG, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=RSA_Enc" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_RSA_ENC, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_RSA_ENC, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=RSA_RevEnc" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_RSA_ENC_REV, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_RSA_ENC_REV, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=ElGamel_Enc" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_ELG_ENC, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_ELG_ENC, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=ElGamel_RevEnc" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_ELG_ENC_REV, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_ELG_ENC_REV, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=ECDSA_Sig" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_ECDSA_SIG, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_ECDSA_SIG, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=ECDSA_SHA256" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_ECDSA_SHA256, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_ECDSA_SHA256, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=ECDSA_SHA384" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_ECDSA_SHA384, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_ECDSA_SHA384, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=ECDSA_SHA512" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_ECDSA_SHA512, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_ECDSA_SHA512, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=CRACK" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_CRACK, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_CRACK, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=Hybrid_RSA" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_HYB_RSA, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_HYB_RSA, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
-			first = True
-			for trio in vpns[ip]["transforms"]:
-
-				if "Auth=Hybrid" in trio[1]:
-					if first:
-						if not AUTH_ANNOUNCEMENT:
-							printMessage("\n[*] %s" % AUTH_ANNOUNCEMENT_TEXT)
-							AUTH_ANNOUNCEMENT = True
-						first = False
-						printMessage("\033[91m[*]\033[0m %s" % FLAW_AUTH_HYB_DSA, args.output)
-
-					if VERBOSE:
-						printMessage("%s" % trio[2], args.output)
-
-					try:
-						fxml.write("\t\t\t<flaw flawid=\"%s\" description=\"%s\" value=\"%s\"><![CDATA[%s]]></flaw>\n" % (flawid, FLAW_AUTH_HYB_DSA, trio[1], trio[2]))
-						flawid += 1
-					except:
-						pass
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Enc=DES", FLAW_ENC_DES, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Enc=IDEA", FLAW_ENC_IDEA, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Enc=Blowfish", FLAW_ENC_BLOW, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Enc=RC5", FLAW_ENC_RC5, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Enc=CAST", FLAW_ENC_CAST, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Enc=3DES", FLAW_ENC_3DES, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Hash=MD5", FLAW_HASH_MD5, HASH_ANNOUNCEMENT, HASH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Hash=SHA1", FLAW_HASH_SHA1, HASH_ANNOUNCEMENT, HASH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Group=1:modp768", FLAW_DHG_1, KE_ANNOUNCEMENT, KE_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Group=2:modp1024", FLAW_DHG_2, KE_ANNOUNCEMENT, KE_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Group=5:modp1536", FLAW_DHG_5, KE_ANNOUNCEMENT, KE_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=PSK", FLAW_AUTH_PSK, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=DSS", FLAW_AUTH_DSA_SIG, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=RSA_Sig", FLAW_AUTH_RSA_SIG, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=RSA_Enc", FLAW_AUTH_RSA_ENC, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=RSA_RevEnc", FLAW_AUTH_RSA_ENC_REV, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=ElGamel_Enc", FLAW_AUTH_ELG_ENC, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=ElGamel_RevEnc", FLAW_AUTH_ELG_ENC_REV, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=ECDSA_Sig", FLAW_AUTH_ECDSA_SIG, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=ECDSA_SHA256", FLAW_AUTH_ECDSA_SHA256, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=ECDSA_SHA384", FLAW_AUTH_ECDSA_SHA384, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=ECDSA_SHA512", FLAW_AUTH_ECDSA_SHA512, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=CRACK", FLAW_AUTH_CRACK, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=Hybrid_RSA", FLAW_AUTH_HYB_RSA, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transforms"], "Auth=Hybrid", FLAW_AUTH_HYB_DSA, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+		if "transformsv2" in list(vpns[ip].keys()):
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Enc=DES", FLAW_ENC_DES, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Enc=IDEA", FLAW_ENC_IDEA, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Enc=Blowfish", FLAW_ENC_BLOW, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Enc=RC5", FLAW_ENC_RC5, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Enc=CAST", FLAW_ENC_CAST, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Enc=3DES", FLAW_ENC_3DES, ENC_ANNOUNCEMENT, ENC_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Hash=MD5", FLAW_HASH_MD5, HASH_ANNOUNCEMENT, HASH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Hash=SHA1", FLAW_HASH_SHA1, HASH_ANNOUNCEMENT, HASH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Group=1:modp768", FLAW_DHG_1, KE_ANNOUNCEMENT, KE_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Group=2:modp1024", FLAW_DHG_2, KE_ANNOUNCEMENT, KE_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Group=5:modp1536", FLAW_DHG_5, KE_ANNOUNCEMENT, KE_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=PSK", FLAW_AUTH_PSK, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=DSS", FLAW_AUTH_DSA_SIG, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=RSA_Sig", FLAW_AUTH_RSA_SIG, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=RSA_Enc", FLAW_AUTH_RSA_ENC, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=RSA_RevEnc", FLAW_AUTH_RSA_ENC_REV, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=ElGamel_Enc", FLAW_AUTH_ELG_ENC, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=ElGamel_RevEnc", FLAW_AUTH_ELG_ENC_REV, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=ECDSA_Sig", FLAW_AUTH_ECDSA_SIG, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=ECDSA_SHA256", FLAW_AUTH_ECDSA_SHA256, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=ECDSA_SHA384", FLAW_AUTH_ECDSA_SHA384, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=ECDSA_SHA512", FLAW_AUTH_ECDSA_SHA512, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=CRACK", FLAW_AUTH_CRACK, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=Hybrid_RSA", FLAW_AUTH_HYB_RSA, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
+			flawid = findTransformFlaw(args, fxml, vpns[ip]["transformsv2"], "Auth=Hybrid", FLAW_AUTH_HYB_DSA, AUTH_ANNOUNCEMENT, AUTH_ANNOUNCEMENT_TEXT, flawid)
 
 		# Aggressive Mode ?
 		if "aggressive" in list(vpns[ip].keys()) and len(vpns[ip]["aggressive"]) > 0:
@@ -1479,73 +1151,70 @@ def parseResults(args, vpns, startTime, endTime):
 		fxml.close()
 	except:
 		pass
+	
+
 
 
 ###############################################################################
-# Main method of the application
+### Main method of the application
 ###############################################################################
 
 def main():
 	'''This is the main method of the application.'''
-
+	
 	# Say 'hello', check for privileges and ike-scan installation and parse the command line
 	welcome()
-
+	
 	if not checkPrivileges():
 		print("\033[91m[*]\033[0m This script requires root privileges.")
 		exit(1)
-
+	
 	vpns = {}
 	args, targets = getArguments()
-
+	
 	if not checkIkeScan():
 		print("\033[91m[*]\033[0m ike-scan could not be found. Please specified the full path with the --ikepath option.")
 		exit(1)
-
+	
 	startTime = strftime("%a, %d %b %Y %H:%M:%S %Z", localtime())
-	printMessage("Starting iker (http://labs.portcullis.co.uk/tools/iker) at %s" % startTime, args.output)
-
+	printMessage("Starting iker at %s" % startTime, args.output)
+	
 	# 1. Discovery
-	discovery(args, targets, vpns)
+	discovery( args, targets, vpns )
 	checkIKEv2(args, targets, vpns)
 
 	if not len(list(vpns.keys())):
-		print("\033[93m[*]\033[0m No IKE service was found.")
-		exit(1)
-
-	# 2. Fingerprint by checking VIDs and by analyzing the service responses
+		print("\033[93m[*]\033[0m No IKE service was found. Bye ;)")
+		exit(0)
+	
+	# 2. Fingerprint by checking VIDs and by analysing the service responses
 	fingerprintVID(args, vpns)
 	if not args.nofingerprint:
 		fingerprintShowbackoff(args, vpns)
-
+	
 	# 3. Ciphers
 	checkEncryptionAlgs(args, vpns)
-
+	
 	# 4. Aggressive Mode
 	checkAggressive(args, vpns)
 
-	# 5. Enumerate client IDs
+	# 5. Ciphers IKEv2
+	checkEncryptionAlgsv2(args, vpns)
+	
+	# 6. Enumerate client IDs
 	enumerateGroupID(args, vpns)
 
 	endTime = strftime("%a, %d %b %Y %H:%M:%S %Z", localtime())
 	printMessage("iker finished enumerating/brute forcing at %s" % endTime, args.output)
 
-	# 6. Parse the results
+	# . Parse the results
 	parseResults(args, vpns, startTime, endTime)
-	
-if __name__ == '__main__':
+
+if  __name__ =='__main__':
 	main()
 
 
-# Verde: \033[92m[*]\033[0m
-# Rojo: \033[91m[*]\033[0m
+
+# Verde: \033[92m[*]\033[0m 
+# Rojo: \033[91m[*]\033[0m 
 # Amarillo: \033[93m[*]\033[0m
-
-# { IP : {
-	# "vid" : ["XXXX", ...]
-	# "showbackoff
-	# "handshake" : ""
-	# "transforms" : ["", "", ...]
-	# }
-
-# }

@@ -1,0 +1,6 @@
+[project]
+name = "iker"
+version = "1.2"
+
+[project.scripts]
+iker = "iker:main"
