@@ -29,6 +29,9 @@ OR
 The following steps will describe how to install ike-scan and iker:
 1. `git clone https://github.com/zamanry/iker.git`
 2. `cd ./iker`
+If prefered pipx can also be used (you will have to be root to run the script so it may not be ideal)
+`pipx install git+https://github.com/miguel090/iker.git`
+
 # Usage
 The following steps will describe how to use iker:
 ## Single host with base scan
