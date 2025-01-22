@@ -57,6 +57,7 @@ Modifications from original v1.1 script:
 ### * Fixed typo of proccess
 ### * Fixed issue with inconsistent IKEv2 information
 ### * Fix incomplete IKEv2 implementation, and added arguments to specify its protocols
+### * Simplified output process
 ### 
 ### How to use it? That's easy!
 ###
@@ -110,7 +111,7 @@ FULLGROUPLIST = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', 
 
 
 # XML Output
-XMLOUTPUT = "output.xml"
+XMLOUTPUT = "iker_output.xml"
 
 # Client IDs dictionary
 CLIENTIDS = ""
@@ -152,13 +153,10 @@ FLAW_AGGR = "Aggressive Mode was accepted by the IKE service which should be dis
 FLAW_AGGR_GRP_NO_ENC = "Aggressive Mode transmits group name without encryption"
 FLAW_CID_ENUM = "Client IDs could be enumerated which should be restricted to only necessary parties or disabled"
 
-
-
 ###############################################################################
 ### Methods
 ###############################################################################
 
-###############################################################################
 def welcome():
 	'''This method prints a welcome message.'''
 	
@@ -169,7 +167,6 @@ The ike-scan based script that checks for security flaws in IPsec-based VPNs.
 
                                by Julio Gomez ( jgo@portcullis-security.com )
 ''' % VERSION)
-	
 
 ###############################################################################
 def checkPrivileges():
@@ -332,8 +329,6 @@ def getArguments():
 		GROUPLIST = FULLGROUPLIST
 
 	return args, targets
-	
-
 
 ###############################################################################
 def printMessage(message, path=None):
@@ -352,8 +347,6 @@ def printMessage(message, path=None):
 		except:
 			pass
 
-
-
 ###############################################################################
 def launchProcess(command):
 	'''Launch a command in a different process and return the process.'''
@@ -371,7 +364,6 @@ def launchProcess(command):
 	
 	return output
 
-
 ###############################################################################
 def delay(time):
 	'''This method wait for a delay.
@@ -379,8 +371,6 @@ def delay(time):
 	
 	if time:
 		sleep( time / 1000.0 )
-
-
 
 ###############################################################################
 def waitForExit(args, vpns, ip, key, value):
@@ -399,8 +389,6 @@ def waitForExit(args, vpns, ip, key, value):
 		parseResults(args, vpns)
 		printMessage( "iker finished at %s" % strftime("%a, %d %b %Y %H:%M:%S +0000", localtime()), args.output )
 		exit(0)
-
-
 
 ###############################################################################
 def updateProgressBar(top, current, transform):
@@ -421,7 +409,6 @@ def updateProgressBar(top, current, transform):
 	stdout.write(progressbar % (perctg, transform))
 	stdout.flush()
 
-
 ###############################################################################
 def checkIkeScan():
 	'''This method checks for the ike-scan location.
@@ -437,7 +424,6 @@ def checkIkeScan():
 		return True
 	else:
 		return False
-
 
 ###############################################################################
 def discovery(args, targets, vpns):
@@ -473,8 +459,6 @@ def discovery(args, targets, vpns):
 				printMessage(info, args.output)
 			else:
 				printMessage("\033[92m[*]\033[0m IKE version 1 is supported by %s" % ip, args.output)
-
-
 
 ###############################################################################
 def checkIKEv2(args, targets, vpns):
@@ -526,7 +510,6 @@ def checkIKEv2(args, targets, vpns):
 				vpns[ip]["v2"] = False
 	except KeyboardInterrupt:
 		waitForExit(args, vpns, ip, "v2", False)
-	
 
 ###############################################################################
 def fingerprintVID(args, vpns, handshake=None):
@@ -569,7 +552,6 @@ def fingerprintVID(args, vpns, handshake=None):
 			
 			printMessage("\033[92m[*]\033[0m Vendor ID identified for IP %s with transform %s: %s" % (ip, transform, vid), args.output)
 
-
 ###############################################################################
 def fingerprintShowbackoff(args, vpns, transform="", vpnip=""):
 	'''This method tries to discover the vendor of the devices and the results
@@ -609,7 +591,6 @@ def fingerprintShowbackoff(args, vpns, transform="", vpnip=""):
 					printMessage("\033[91m[*]\033[0m The device %s could not been fingerprinted because no transform is known." % ip, args.output)
 	except KeyboardInterrupt:
 		waitForExit(args, vpns, ip, "showbackoff", " ")
-
 
 ###############################################################################
 def checkEncryptionAlgs(args, vpns):
@@ -719,6 +700,7 @@ def checkEncryptionAlgsv2(args, vpns):
 			waitForExit(args, vpns, ip, "transformsv2", vpns[ip]["transformsv2"])
 
 ###############################################################################
+
 def checkAggressive(args, vpns):
 	'''This method tries to check if aggressive mode is available. If so,
 	it also store the returned handshake to a text file.
@@ -769,9 +751,8 @@ def checkAggressive(args, vpns):
 		else:
 			waitForExit(args, vpns, ip, "aggressive", vpns[ip]["aggressive"])
 
-
-
 ###############################################################################
+
 def enumerateGroupIDCiscoDPD(args, vpns, ip):
 	'''This method tries to enumerate valid client IDs from a dictionary.
 	@param args The command line parameters
@@ -838,9 +819,8 @@ def enumerateGroupIDCiscoDPD(args, vpns, ip):
 	
 	return possible
 
-
-
 ###############################################################################
+
 def enumerateGroupID(args, vpns):
 	'''This method tries to enumerate valid client IDs from a dictionary.
 	@param args The command line parameters
@@ -937,6 +917,7 @@ def enumerateGroupID(args, vpns):
 			pass
 
 ###############################################################################
+
 def findTransformFlaw(args, fxml, transforms, flaw_string, flaw, announcement, announcement_text, flawid):
 	first = True
 	for trio in transforms:
@@ -958,7 +939,7 @@ def findTransformFlaw(args, fxml, transforms, flaw_string, flaw, announcement, a
 				pass
 	return flawid
 
-		
+###############################################################################
 
 def parseResults(args, vpns, startTime, endTime):
 	'''This method analyzes the results and prints them where correspond.
@@ -1151,9 +1132,6 @@ def parseResults(args, vpns, startTime, endTime):
 		fxml.close()
 	except:
 		pass
-	
-
-
 
 ###############################################################################
 ### Main method of the application
@@ -1212,8 +1190,6 @@ def main():
 
 if  __name__ =='__main__':
 	main()
-
-
 
 # Verde: \033[92m[*]\033[0m 
 # Rojo: \033[91m[*]\033[0m 
