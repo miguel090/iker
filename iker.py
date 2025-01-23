@@ -74,7 +74,7 @@ from sys import exit, stdout
 from os import geteuid
 import subprocess
 import argparse
-from re import sub
+from re import sub, search
 from time import localtime, strftime, sleep
 
 ###############################################################################
@@ -217,7 +217,7 @@ def getArguments():
 	args = parser.parse_args()
 
 	if args.target:
-		if re.search(r'[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+', args.target):  # did not use \d shorthand since it searches ALL UNIX digits and is slower
+		if search(r'[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+', args.target):  # did not use \d shorthand since it searches ALL UNIX digits and is slower
 			targets.append(args.target)
 		else:
 			print("\033[91m[*]\033[0m You need to specify a target in CIDR notation or an input file (-i).")
