@@ -478,13 +478,14 @@ def checkIKEv2(args, targets, vpns):
 			ip = None
 			info = ""
 			no_ikev1=False
+			ikev2=False
 			for line in process_output.splitlines():
 				if not line.split() or "Starting ike-scan" in line or "Ending ike-scan" in line:
 					continue
 
 				if line[0].isdigit():
 					ip = line.split()[0]
-					printMessage("\033[92m[*]\033[0m IKE version 2 is supported by %s" % ip, args.output)
+					ikev2=True
 					ips.append(ip)
 					if ip in list(vpns.keys()):
 						vpns[ip]["v2"] = True
@@ -495,9 +496,12 @@ def checkIKEv2(args, targets, vpns):
 						vpns[ip]["v1"] = False
 						vpns[ip]["v1"] = False
 						no_ikev1=True
-				else:
-					printMessage("\033[91m[*]\033[0m IKE version 2 is not supported by %s" % target, args.output)
 				info = info + line
+
+			if ikev2:
+				printMessage("\033[92m[*]\033[0m IKE version 2 is supported by %s" % ip, args.output)
+			else:
+				printMessage("\033[91m[*]\033[0m IKE version 2 is not supported by %s" % target, args.output)
 
 			if no_ikev1:
 				vpns[ip]["handshake"] = info
@@ -598,11 +602,16 @@ def checkEncryptionAlgs(args, vpns):
 	are written in the vpns variable.
 	@param args The command line parameters
 	@param vpns A dictionary to store all the information'''
+
+	checklist = []
+	for ip in list(vpns.keys()):
+		if vpns[ip]["v1"] is True:
+			checklist.append(ip)
 	
 	try:
 		top = len(ENCLIST) * len(HASHLIST) * len(AUTHLIST) * len(GROUPLIST)
 
-		for ip in list(vpns.keys()):
+		for ip in checklist:
 			current=0
 			printMessage( "\n[*] Looking for accepted IKEv1 transforms at %s" % ip, args.output)
 			vpns[ip]["transforms"] = []
@@ -651,10 +660,15 @@ def checkEncryptionAlgsv2(args, vpns):
 	@param args The command line parameters
 	@param vpns A dictionary to store all the information'''
 
+	checklist = []
+	for ip in list(vpns.keys()):
+		if vpns[ip]["v2"] is True:
+			checklist.append(ip)
+	
 	try:
 		top = len(ENCLISTv2) * len(HASHLISTv2) * len(AUTHLIST) * len(GROUPLIST)
 		# current = 0
-		for ip in list(vpns.keys()):
+		for ip in checklist:
 			current = 0
 			printMessage("\n[*] Looking for accepted IKEv2 transforms at %s" % ip, args.output)
 			vpns[ip]["transformsv2"] = []
@@ -706,10 +720,15 @@ def checkAggressive(args, vpns):
 	it also store the returned handshake to a text file.
 	@param args The command line parameters
 	@param vpns A dictionary to store all the information'''
+
+	checklist = []
+	for ip in list(vpns.keys()):
+		if vpns[ip]["v1"] is True:
+			checklist.append(ip)
 	
 	try:
 		top = len(ENCLIST) * len(HASHLIST) * len(AUTHLIST) * len(GROUPLIST)
-		for ip in list(vpns.keys()):
+		for ip in checklist:
 			current = 0
 			printMessage("\n[*] Looking for accepted IKEv1 transforms in aggressive mode at %s" % ip, args.output)
 			vpns[ip]["aggressive"] = []
